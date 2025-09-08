@@ -133,6 +133,7 @@ class SerialClient:
 
         self._ser: Optional[serial.Serial] = None
         self._lock = threading.RLock()
+        self._stop_event = threading.Event()
         self._closing = False
 
         self.log = logger or logging.getLogger(self.__class__.__name__)
@@ -172,7 +173,10 @@ class SerialClient:
             delay = max(0.0, self._retry_delay)
             last_exc: Optional[BaseException] = None
 
-            while True:
+            while not self._closing:
+                if self._stop_event.is_set():
+                    raise SerialException("Connect cancelled")
+
                 attempt += 1
                 try:
                     self.log.debug("Opening serial port %s (attempt %d)", port, attempt)
@@ -344,7 +348,10 @@ class SerialClient:
         attempt = 0
         delay = max(0.0, self._retry_delay)
         last_exc: Optional[BaseException] = None
-        while True:
+        while not self._closing:
+            if self._stop_event.is_set():
+                raise SerialException("Connect cancelled")
+
             attempt += 1
             try:
                 ser = serial.Serial(port=port, **self._serial_kwargs)
@@ -367,6 +374,11 @@ class SerialClient:
         raise SerialException(
             f"Reconnect to {port!r} failed after {attempt} attempt(s): {last_exc}"
         )
+
+    def cancel_reconnects(self) -> None:
+        """Tell reconnect/initial connect loops to stop ASAP."""
+        self._stop_event.set()
+        self._auto_reconnect = False
 
     @staticmethod
     def list_macos_ports() -> list[str]:
