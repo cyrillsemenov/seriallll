@@ -196,7 +196,8 @@ class SerialClient:
                     # Decide whether to retry.
                     if self._max_retries >= 0 and attempt >= max(1, self._max_retries):
                         break
-                    time.sleep(delay)
+                    if self._wait(delay):
+                        raise SerialException("Connect cancelled")
                     delay = min(
                         self._max_retry_delay,
                         delay * self._backoff_factor if delay else self._retry_delay,
@@ -207,6 +208,7 @@ class SerialClient:
             )
 
     def close(self) -> None:
+        self.cancel_reconnects()
         with self._lock:
             self._closing = True
             try:
@@ -217,32 +219,32 @@ class SerialClient:
                         self._on_disconnect(self)
             finally:
                 self._ser = None
-                self._closing = False
 
     def write(self, data: LineLike) -> int:
         """Write raw bytes or a string (encoded as utf-8). Returns bytes written.
         Auto-reconnects if enabled and the write fails.
         """
-        if isinstance(data, str):
-            payload = data.encode("utf-8")
-        else:
-            payload = bytes(data)
+        payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
 
-        def _try() -> int:
-            if not self.is_open:
-                self._maybe_reconnect()
-            assert self._ser is not None
-            return self._ser.write(payload)
+        with self._lock:
+            is_open = self.is_open
+
+        if not is_open:
+            self._maybe_reconnect()
 
         with self._lock:
             try:
-                return _try()
+                assert self._ser is not None
+                return self._ser.write(payload)
             except BaseException as e:
                 self.log.warning("Write error: %s", e)
                 if not self._auto_reconnect:
                     raise
-                self._force_reconnect()
-                return _try()
+
+        self._force_reconnect()
+        with self._lock:
+            assert self._ser is not None
+            return self._ser.write(payload)
 
     def write_line(self, line: LineLike, newline: bytes | str = b"\n") -> int:
         if isinstance(newline, str):
@@ -261,17 +263,26 @@ class SerialClient:
         Auto-reconnects if enabled and read fails.
         """
         with self._lock:
-            if not self.is_open:
-                self._maybe_reconnect()
+            is_open = self.is_open
+
+        if not is_open:
+            self._maybe_reconnect()
+
+        with self._lock:
             assert self._ser is not None
-            original = self._ser.timeout
             try:
                 if timeout is not None:
-                    self._ser.timeout = timeout
+                    try:
+                        self._ser.timeout = timeout
+                    except OSError:
+                        pass
                 return self._read_with_reconnect(size)
             finally:
                 if timeout is not None and self._ser:
-                    self._ser.timeout = original
+                    try:
+                        self._ser.timeout = self._timeout
+                    except OSError:
+                        pass
 
     def _read_with_reconnect(self, size: int) -> bytes:
         assert self._ser is not None
@@ -366,7 +377,8 @@ class SerialClient:
                 last_exc = e
                 if self._max_retries >= 0 and attempt >= max(1, self._max_retries):
                     break
-                time.sleep(delay)
+                if self._wait(delay):
+                    raise SerialException("Connect cancelled")
                 delay = min(
                     self._max_retry_delay,
                     delay * self._backoff_factor if delay else self._retry_delay,
@@ -374,6 +386,10 @@ class SerialClient:
         raise SerialException(
             f"Reconnect to {port!r} failed after {attempt} attempt(s): {last_exc}"
         )
+
+    def _wait(self, delay: float) -> bool:
+        """Return True if stop/closing is requested during wait."""
+        return self._stop_event.wait(delay) or self._closing
 
     def cancel_reconnects(self) -> None:
         """Tell reconnect/initial connect loops to stop ASAP."""
