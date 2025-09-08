@@ -12,7 +12,7 @@ A small, modest Python helper for talking to serial ports. Works elsewhere via [
 ```bash
 pip install seriallll
 # or
-uv seriallll 
+uv add seriallll 
 ```
 
 ## Quick start
